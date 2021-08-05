@@ -1,0 +1,123 @@
+- hosts: master
+  become: yes
+  tasks:
+  - name: Add an apt signing key for Kubernetes
+    apt_key:
+      url: https://packages.cloud.google.com/apt/doc/apt-key.gpg
+      state: present
+
+  - name: Adding apt repository for Kubernetes
+    apt_repository:
+      repo: deb https://apt.kubernetes.io/ kubernetes-xenial main
+      filename: kubernetes.list
+      state: present
+
+  - name: configure the system
+    command: swapoff -a
+
+  - name: Update the apt cache
+    apt:
+      update_cache: yes
+
+  - name: installing docker,kubernetes
+    apt:
+      name: "{{ item }}"
+      state: present
+    with_items:
+      - docker.io
+      - kubeadm=1.21.3-00
+      - kubelet=1.21.3-00
+      - kubectl=1.21.3-00 
+
+  - name: apt hold the kubernetes cluster version
+    dpkg_selections:
+       name: "{{ item }}"
+       selection: hold
+    with_items:
+      - kubeadm
+      - kubelet
+      - kubectl
+
+  - name: Restart kubelet
+    service:
+      name: kubelet
+      daemon_reload: yes
+      state: restarted
+
+  - name: get Calico Project network plugin
+    command: kubeadm init --kubernetes-version 1.21.3 --pod-network-cidr 192.168.0.0/16
+
+  - name: kubernetes directory
+    file:
+      path: /home/{{ ansible_ssh_user }}/.kube
+      state: directory
+      owner: "{{ ansible_ssh_user }}"
+      group: "{{ ansible_ssh_user }}"
+
+
+  - name: configure the kubernetes
+    copy:
+     src: /etc/kubernetes/admin.conf 
+     dest:  /home/{{ ansible_ssh_user }}/.kube/config
+     owner: "{{ ansible_ssh_user }}"
+     group: "{{ ansible_ssh_user }}"
+     remote_src: yes
+
+  - name: Apply Calico network plugin from ProjectCalico.org
+    command: kubectl apply -f https://docs.projectcalico.org/manifests/calico.yaml
+    become: no
+
+  - name: Generate join 
+    command: kubeadm token create --print-join-command
+    register: join_node
+  - name: kubernetes join command holder
+    add_host:
+      name: "join_holder"
+      join_command: "{{ join_node.stdout_lines[0] }}"
+  - name: kubeadm print join command
+    debug:
+      msg: "{{ join_node.stdout_lines[0] }}"
+
+- hosts: node1
+  become: yes
+  tasks:
+  - pause:
+      prompt: "Are you want to continue to add node? (yes/no)"
+    register: confirm_add_node
+
+  - name: install kubernetes on node
+    block:
+      - apt_key:
+          url: https://packages.cloud.google.com/apt/doc/apt-key.gpg
+          state: present
+      - apt_repository:
+          repo: deb https://apt.kubernetes.io/ kubernetes-xenial main
+          filename: kubernetes.list
+          state: present
+      - apt:
+          update_cache: yes
+      - name: configure the system
+        command: swapoff -a
+      - name: installing docker,kubernetes
+        apt:
+          name: "{{ item }}"
+          state: present
+        with_items:
+          - docker.io
+          - kubeadm=1.21.3-00
+          - kubelet=1.21.3-00
+          - kubectl=1.21.3-00
+
+      - name: apt hold the kubernetes cluster version
+        dpkg_selections:
+          name: "{{ item }}"
+          selection: hold
+        with_items:
+          - kubeadm
+          - kubelet
+          - kubectl
+      - name: join node
+        shell: "{{ hostvars['join_holder']['join_command'] }}"
+
+    when: confirm_add_node.user_input | bool
+
